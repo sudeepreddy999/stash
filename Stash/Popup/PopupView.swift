@@ -27,6 +27,10 @@ struct PopupView: View {
 
     private let blobCornerRadius: CGFloat = 14
 
+    /// Drives the blob entrance animation. Flipped off→on whenever the popup
+    /// (re)appears so the blobs cascade in.
+    @State private var reveal = false
+
     private var items: [ClipItem] { controller.visibleItems }
 
     var body: some View {
@@ -48,6 +52,12 @@ struct PopupView: View {
                 .contentShape(Rectangle())
                 .onTapGesture { controller.hide() }
         )
+        .onAppear { reveal = true }
+        .onChange(of: controller.revealToken) { _, _ in
+            // Reset instantly, then cascade back in on the next runloop tick.
+            reveal = false
+            DispatchQueue.main.async { reveal = true }
+        }
     }
 
     // MARK: - Header
@@ -90,13 +100,9 @@ struct PopupView: View {
         }
         .frame(maxWidth: .infinity)
         .frame(height: 130)
-        .background(.regularMaterial, in: RoundedRectangle(cornerRadius: blobCornerRadius, style: .continuous))
-        .overlay(
-            RoundedRectangle(cornerRadius: blobCornerRadius, style: .continuous)
-                .strokeBorder(Color.white.opacity(0.08), lineWidth: 0.5)
-        )
+
         .shadow(color: .black.opacity(0.18), radius: 8, y: 4)
-        .glassEffect()
+        .glassEffect(in: RoundedRectangle(cornerRadius: 16))
     }
 
     // MARK: - Items
@@ -115,10 +121,41 @@ struct PopupView: View {
                 .onHover { hovering in
                     if hovering { controller.hover(idx) }
                 }
+                .modifier(BlobReveal(index: idx, reveal: reveal))
             }
         }
         .padding(.vertical, 2)
         .frame(height: controller.listViewportHeight, alignment: .top)
+    }
+}
+
+// MARK: - Blob entrance animation
+
+/// Fades + slides + subtly scales a blob into place, staggered by its row
+/// index so the list cascades in. Reset is instantaneous (no reverse
+/// animation) so re-showing the popup replays a clean entrance.
+private struct BlobReveal: ViewModifier {
+    let index: Int
+    let reveal: Bool
+
+    @State private var shown = false
+
+    func body(content: Content) -> some View {
+        content
+            .opacity(shown ? 1 : 0)
+            .offset(y: shown ? 0 : 12)
+            .scaleEffect(shown ? 1 : 0.96, anchor: .top)
+            .onAppear { if reveal { animateIn() } }
+            .onChange(of: reveal) { _, isRevealing in
+                if isRevealing { animateIn() } else { shown = false }
+            }
+    }
+
+    private func animateIn() {
+        withAnimation(.spring(response: 0.42, dampingFraction: 0.82)
+            .delay(Double(index) * 0.05)) {
+            shown = true
+        }
     }
 }
 
@@ -158,8 +195,8 @@ struct ItemBlob: View {
             .frame(maxWidth: .infinity, alignment: .leading)
             Spacer(minLength: 0)
         }
-        .padding(.horizontal, 12)
-        .padding(.vertical, 9)
+        .padding(.horizontal, 16)
+        .padding(.vertical, 12)
         .frame(minHeight: minBlobHeight, maxHeight: maxBlobHeight, alignment: .center)
         .shadow(color: .black.opacity(isSelected ? 0.22 : 0.14), radius: isSelected ? 8 : 5, y: 2)
         .glassEffect()

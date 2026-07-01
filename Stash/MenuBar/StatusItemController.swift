@@ -18,10 +18,16 @@ final class StatusItemController: NSObject, NSPopoverDelegate {
     private let popover: NSPopover
     private var cancellables = Set<AnyCancellable>()
 
-    /// Local key monitor installed while the popover is open so Escape closes
-    /// it. `NSPopover` dismisses on outside clicks (`.transient`) but does not
-    /// handle Escape on its own when the content is SwiftUI.
+    /// Event monitors installed while the popover is open.
+    ///
+    /// - `escKeyMonitor` closes on Escape — `NSPopover` doesn't handle it when
+    ///   the content is SwiftUI.
+    /// - `outsideClickMonitor` closes on clicks outside the popover. We drive
+    ///   this ourselves rather than trusting `.transient`, whose outside-click
+    ///   dismissal is tied to an app activation *transition* and stops working
+    ///   after an Esc-triggered close (which leaves the app already active).
     private var escKeyMonitor: Any?
+    private var outsideClickMonitor: Any?
 
     /// Captured when the popover opens so `paste(_:)` can restore focus to
     /// whatever the user was doing before clicking the menu bar.
@@ -94,11 +100,13 @@ final class StatusItemController: NSObject, NSPopoverDelegate {
         previousApp = NSWorkspace.shared.frontmostApplication
         NSApp.activate(ignoringOtherApps: true)
         popover.show(relativeTo: button.bounds, of: button, preferredEdge: .minY)
-        installEscMonitor()
+        installDismissMonitors()
     }
 
-    private func installEscMonitor() {
-        removeEscMonitor()
+    private func installDismissMonitors() {
+        removeDismissMonitors()
+
+        // Escape closes.
         escKeyMonitor = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { [weak self] event in
             guard let self else { return event }
             // 53 = Escape
@@ -106,12 +114,32 @@ final class StatusItemController: NSObject, NSPopoverDelegate {
             MainActor.assumeIsolated { self.popover.performClose(nil) }
             return nil
         }
+
+        // Clicks outside the popover close it. Global monitors only see events
+        // headed for *other* apps, so in-popover clicks don't reach here; the
+        // frame hit-test is a safety net for the accessory-app case where the
+        // popover can be shown while our app isn't active.
+        outsideClickMonitor = NSEvent.addGlobalMonitorForEvents(
+            matching: [.leftMouseDown, .rightMouseDown, .otherMouseDown]
+        ) { [weak self] _ in
+            let location = NSEvent.mouseLocation
+            Task { @MainActor in
+                guard let self else { return }
+                if let frame = self.popover.contentViewController?.view.window?.frame,
+                   frame.contains(location) { return }
+                self.popover.performClose(nil)
+            }
+        }
     }
 
-    private func removeEscMonitor() {
+    private func removeDismissMonitors() {
         if let monitor = escKeyMonitor {
             NSEvent.removeMonitor(monitor)
             escKeyMonitor = nil
+        }
+        if let monitor = outsideClickMonitor {
+            NSEvent.removeMonitor(monitor)
+            outsideClickMonitor = nil
         }
     }
 
@@ -129,7 +157,7 @@ final class StatusItemController: NSObject, NSPopoverDelegate {
     // dismisses the popover without picking anything.
     func popoverDidClose(_ notification: Notification) {
         previousApp = nil
-        removeEscMonitor()
+        removeDismissMonitors()
     }
 
     // MARK: - Icon animation

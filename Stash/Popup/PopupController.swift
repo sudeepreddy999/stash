@@ -19,6 +19,11 @@ import SwiftUI
 final class PopupController: ObservableObject {
     @Published var selection: Int = 0
 
+    /// Bumped on every `show()` so the popup can replay the blob entrance
+    /// animation each time it appears. The hosting view is reused across
+    /// show/hide, so `onAppear` alone only fires once.
+    @Published private(set) var revealToken = 0
+
     private var panel: KeyablePanel?
     private var previousApp: NSRunningApplication?
     private var outsideClickMonitor: Any?
@@ -63,6 +68,7 @@ final class PopupController: ObservableObject {
     func show() {
         previousApp = NSWorkspace.shared.frontmostApplication
         selection = 0
+        revealToken &+= 1
 
         if panel == nil { panel = buildPanel() }
         guard let panel else { return }
