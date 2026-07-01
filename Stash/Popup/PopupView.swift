@@ -69,6 +69,9 @@ struct PopupView: View {
         .frame(height: 34)
         .shadow(color: .black.opacity(0.18), radius: 6, y: 3)
         .glassEffect()
+        // The header doubles as a title bar: grab it to drag the popup around,
+        // just like a normal window.
+        .overlay(WindowDragHandle())
     }
 
     // MARK: - Empty state

@@ -18,6 +18,11 @@ final class StatusItemController: NSObject, NSPopoverDelegate {
     private let popover: NSPopover
     private var cancellables = Set<AnyCancellable>()
 
+    /// Local key monitor installed while the popover is open so Escape closes
+    /// it. `NSPopover` dismisses on outside clicks (`.transient`) but does not
+    /// handle Escape on its own when the content is SwiftUI.
+    private var escKeyMonitor: Any?
+
     /// Captured when the popover opens so `paste(_:)` can restore focus to
     /// whatever the user was doing before clicking the menu bar.
     private var previousApp: NSRunningApplication?
@@ -89,6 +94,25 @@ final class StatusItemController: NSObject, NSPopoverDelegate {
         previousApp = NSWorkspace.shared.frontmostApplication
         NSApp.activate(ignoringOtherApps: true)
         popover.show(relativeTo: button.bounds, of: button, preferredEdge: .minY)
+        installEscMonitor()
+    }
+
+    private func installEscMonitor() {
+        removeEscMonitor()
+        escKeyMonitor = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { [weak self] event in
+            guard let self else { return event }
+            // 53 = Escape
+            guard event.keyCode == 53 else { return event }
+            MainActor.assumeIsolated { self.popover.performClose(nil) }
+            return nil
+        }
+    }
+
+    private func removeEscMonitor() {
+        if let monitor = escKeyMonitor {
+            NSEvent.removeMonitor(monitor)
+            escKeyMonitor = nil
+        }
     }
 
     /// Called from `MenuBarContent` when the user taps a row.
@@ -105,6 +129,7 @@ final class StatusItemController: NSObject, NSPopoverDelegate {
     // dismisses the popover without picking anything.
     func popoverDidClose(_ notification: Notification) {
         previousApp = nil
+        removeEscMonitor()
     }
 
     // MARK: - Icon animation

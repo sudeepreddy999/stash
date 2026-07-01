@@ -72,6 +72,11 @@ final class PopupController: ObservableObject {
 
         NSApp.activate(ignoringOtherApps: true)
         panel.makeKeyAndOrderFront(nil)
+        // Assert front/key even if the app didn't fully activate (accessory
+        // apps lose the activation race after a paste reactivates the previous
+        // app). Without this the panel can appear while our app is inactive,
+        // which lets clicks on it leak to the outside-click monitor.
+        panel.orderFrontRegardless()
 
         NSAnimationContext.runAnimationGroup { ctx in
             ctx.duration = 0.12
@@ -218,7 +223,19 @@ final class PopupController: ObservableObject {
         outsideClickMonitor = NSEvent.addGlobalMonitorForEvents(
             matching: [.leftMouseDown, .rightMouseDown, .otherMouseDown]
         ) { [weak self] _ in
-            Task { @MainActor in self?.hide() }
+            // Screen-coordinate mouse location, captured now (closest to the
+            // click) rather than inside the async hop.
+            let location = NSEvent.mouseLocation
+            Task { @MainActor in
+                guard let self, let panel = self.panel else { return }
+                // Clicks inside the popup must never dismiss it. Global monitors
+                // normally only see events for *other* apps, but when the popup
+                // is shown while our accessory app isn't active, clicks on the
+                // panel (e.g. grabbing the header to drag) surface here too — and
+                // dismissing on those is the drag-gets-cancelled bug.
+                if panel.frame.contains(location) { return }
+                self.hide()
+            }
         }
 
         localKeyMonitor = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { [weak self] event in
