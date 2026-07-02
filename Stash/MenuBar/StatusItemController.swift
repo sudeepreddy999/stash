@@ -61,7 +61,9 @@ final class StatusItemController: NSObject, NSPopoverDelegate {
         button.wantsLayer = true
 
         button.target = self
-        button.action = #selector(togglePopover(_:))
+        button.action = #selector(handleClick(_:))
+        // Right-click gets a quick context menu — standard menu-bar-app UX.
+        button.sendAction(on: [.leftMouseUp, .rightMouseUp])
     }
 
     private func configurePopover() {
@@ -91,7 +93,53 @@ final class StatusItemController: NSObject, NSPopoverDelegate {
 
     // MARK: - Popover
 
-    @objc private func togglePopover(_ sender: Any?) {
+    @objc private func handleClick(_ sender: Any?) {
+        if NSApp.currentEvent?.type == .rightMouseUp {
+            showContextMenu()
+            return
+        }
+        togglePopover()
+    }
+
+    private func showContextMenu() {
+        let menu = NSMenu()
+
+        let open = NSMenuItem(title: "Open Popup", action: #selector(menuOpenPopup), keyEquivalent: "")
+        open.target = self
+        menu.addItem(open)
+
+        let settings = NSMenuItem(title: "Settings…", action: #selector(menuOpenSettings), keyEquivalent: "")
+        settings.target = self
+        menu.addItem(settings)
+
+        let clear = NSMenuItem(title: "Clear History…", action: #selector(menuClearHistory), keyEquivalent: "")
+        clear.target = self
+        menu.addItem(clear)
+
+        menu.addItem(.separator())
+
+        let quit = NSMenuItem(title: "Quit Stash", action: #selector(menuQuit), keyEquivalent: "")
+        quit.target = self
+        menu.addItem(quit)
+
+        // Attach just long enough to run the tracking loop, then detach so
+        // the next left-click goes back to the popover action.
+        statusItem.menu = menu
+        statusItem.button?.performClick(nil)
+        statusItem.menu = nil
+    }
+
+    @objc private func menuOpenPopup() {
+        // The status-item click didn't activate Stash, so the popup captures
+        // the user's app as the focus target on its own.
+        appState.popup.show()
+    }
+
+    @objc private func menuOpenSettings() { appState.openSettings() }
+    @objc private func menuClearHistory() { appState.confirmAndClearHistory() }
+    @objc private func menuQuit() { NSApp.terminate(nil) }
+
+    private func togglePopover() {
         if popover.isShown {
             popover.performClose(nil)
             return
@@ -140,6 +188,18 @@ final class StatusItemController: NSObject, NSPopoverDelegate {
         if let monitor = outsideClickMonitor {
             NSEvent.removeMonitor(monitor)
             outsideClickMonitor = nil
+        }
+    }
+
+    /// Called from `MenuBarContent`'s "Open popup" footer button. Hands the
+    /// popover's captured focus target to the cursor popup — by the time the
+    /// popup asks `frontmostApplication` itself, the answer would be Stash.
+    func openCursorPopup() {
+        let prev = previousApp
+        previousApp = nil
+        popover.performClose(nil)
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.05) { [weak self] in
+            self?.appState.popup.show(returningFocusTo: prev)
         }
     }
 

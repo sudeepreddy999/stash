@@ -3,6 +3,7 @@ import Carbon.HIToolbox
 
 struct SettingsView: View {
     @EnvironmentObject var appState: AppState
+    @EnvironmentObject var store: ClipboardStore
 
     private let presets: [(String, Hotkey)] = [
         ("⌘⇧V", Hotkey(keyCode: UInt32(kVK_ANSI_V), modifiers: UInt32(cmdKey | shiftKey))),
@@ -12,8 +13,22 @@ struct SettingsView: View {
         ("⌘⇧B", Hotkey(keyCode: UInt32(kVK_ANSI_B), modifiers: UInt32(cmdKey | shiftKey))),
     ]
 
+    private let historySizes = [50, 100, 200, 500]
+
     var body: some View {
         Form {
+            Section("General") {
+                Toggle("Launch Stash at login", isOn: $appState.launchAtLogin)
+                Picker("Keep up to", selection: maxItemsBinding) {
+                    ForEach(historySizes, id: \.self) { n in
+                        Text("\(n) clips").tag(n)
+                    }
+                }
+                .pickerStyle(.menu)
+                Text("Pinned clips don't count against the limit and are never trimmed.")
+                    .font(.footnote)
+                    .foregroundStyle(.secondary)
+            }
             Section("Shortcut") {
                 Picker("Open Stash with", selection: hotkeyBinding) {
                     ForEach(presets, id: \.0) { label, hk in
@@ -21,19 +36,28 @@ struct SettingsView: View {
                     }
                 }
                 .pickerStyle(.menu)
-                Text("Press this anywhere to open the popup near your cursor.")
+                if appState.hotkeyRegistrationFailed {
+                    Label(
+                        "This shortcut is in use by another app — pick a different one.",
+                        systemImage: "exclamationmark.triangle.fill"
+                    )
                     .font(.footnote)
-                    .foregroundStyle(.secondary)
+                    .foregroundStyle(.orange)
+                } else {
+                    Text("Press this anywhere to open the popup near your cursor.")
+                        .font(.footnote)
+                        .foregroundStyle(.secondary)
+                }
             }
             Section("History") {
                 HStack {
                     Text("Items stored")
                     Spacer()
-                    Text("\(appState.store.items.count)")
+                    Text("\(store.items.count)")
                         .foregroundStyle(.secondary)
                 }
-                Button("Clear all history", role: .destructive) {
-                    appState.store.clear()
+                Button("Clear all history…", role: .destructive) {
+                    appState.confirmAndClearHistory()
                 }
             }
             Section("Permissions") {
@@ -41,20 +65,25 @@ struct SettingsView: View {
                     .font(.footnote)
                     .foregroundStyle(.secondary)
                 Button("Open Accessibility settings") {
-                    if let url = URL(string: "x-apple.systempreferences:com.apple.preference.security?Privacy_Accessibility") {
-                        NSWorkspace.shared.open(url)
-                    }
+                    appState.openAccessibilitySettings()
                 }
             }
         }
         .formStyle(.grouped)
-        .frame(width: 460, height: 380)
+        .frame(width: 460, height: 480)
     }
 
     private var hotkeyBinding: Binding<Hotkey> {
         Binding(
             get: { appState.currentHotkey },
             set: { appState.currentHotkey = $0 }
+        )
+    }
+
+    private var maxItemsBinding: Binding<Int> {
+        Binding(
+            get: { store.maxItems },
+            set: { store.setMaxItems($0) }
         )
     }
 }

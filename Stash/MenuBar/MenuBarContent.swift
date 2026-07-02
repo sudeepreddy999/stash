@@ -16,12 +16,34 @@ struct MenuBarContent: View {
     @EnvironmentObject var appState: AppState
     @EnvironmentObject var store: ClipboardStore
 
+    @State private var query = ""
+
     private let maxListHeight: CGFloat = 340
     private let popoverWidth: CGFloat = 320
+
+    private var searchResults: [ClipItem] {
+        let q = query.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !q.isEmpty else { return store.items }
+        return store.items.filter { matches($0, query: q) }
+    }
+
+    private func matches(_ item: ClipItem, query: String) -> Bool {
+        switch item.kind {
+        case .text:
+            return item.text?.localizedCaseInsensitiveContains(query) ?? false
+        case .file:
+            return (item.filePaths ?? []).contains { $0.localizedCaseInsensitiveContains(query) }
+        case .image:
+            return "image".localizedCaseInsensitiveContains(query)
+        }
+    }
 
     var body: some View {
         VStack(spacing: 0) {
             header
+            if !store.items.isEmpty {
+                searchField
+            }
             Divider().opacity(0.25)
             list
             Divider().opacity(0.25)
@@ -54,28 +76,56 @@ struct MenuBarContent: View {
         .padding(.bottom, 8)
     }
 
+    private var searchField: some View {
+        HStack(spacing: 6) {
+            Image(systemName: "magnifyingglass")
+                .font(.system(size: 10, weight: .medium))
+                .foregroundStyle(.tertiary)
+            TextField("Search history", text: $query)
+                .textFieldStyle(.plain)
+                .font(.system(size: 12))
+            if !query.isEmpty {
+                Button {
+                    query = ""
+                } label: {
+                    Image(systemName: "xmark.circle.fill")
+                        .font(.system(size: 10))
+                        .foregroundStyle(.tertiary)
+                }
+                .buttonStyle(.plain)
+            }
+        }
+        .padding(.horizontal, 8)
+        .padding(.vertical, 5)
+        .background(
+            RoundedRectangle(cornerRadius: 7, style: .continuous)
+                .fill(Color.secondary.opacity(0.1))
+        )
+        .padding(.horizontal, 12)
+        .padding(.bottom, 8)
+    }
+
     @ViewBuilder
     private var list: some View {
         if store.items.isEmpty {
-            VStack(spacing: 6) {
-                Image(systemName: "tray")
-                    .font(.system(size: 22, weight: .light))
-                    .foregroundStyle(.tertiary)
-                Text("Nothing stashed yet")
-                    .font(.footnote)
-                    .foregroundStyle(.secondary)
-            }
-            .frame(maxWidth: .infinity)
-            .padding(.vertical, 32)
+            emptyState(
+                symbol: "tray",
+                title: "Nothing stashed yet",
+                caption: "Copy something with ⌘C to get started"
+            )
+        } else if searchResults.isEmpty {
+            emptyState(
+                symbol: "magnifyingglass",
+                title: "No matches",
+                caption: "Nothing in history matches “\(query)”"
+            )
         } else {
             ScrollView {
-                LazyVStack(spacing: 2) {
-                    ForEach(Array(store.items.enumerated()), id: \.element.id) { idx, item in
-                        MenuClipRow(item: item, index: idx + 1)
-                            .contentShape(Rectangle())
-                            .onTapGesture {
-                                appState.statusItemController?.paste(item)
-                            }
+                LazyVStack(spacing: 2, pinnedViews: []) {
+                    if query.isEmpty {
+                        sectionedRows
+                    } else {
+                        rows(for: searchResults)
                     }
                 }
                 .padding(6)
@@ -84,15 +134,65 @@ struct MenuBarContent: View {
         }
     }
 
+    /// Pinned clips float in their own group above the recents.
+    @ViewBuilder
+    private var sectionedRows: some View {
+        let pinned = store.pinnedItems
+        if !pinned.isEmpty {
+            sectionLabel("Pinned")
+            rows(for: pinned)
+            sectionLabel("Recent")
+        }
+        rows(for: store.recentItems)
+    }
+
+    @ViewBuilder
+    private func rows(for items: [ClipItem]) -> some View {
+        ForEach(items) { item in
+            MenuClipRow(item: item)
+                .contentShape(Rectangle())
+                .onTapGesture {
+                    appState.statusItemController?.paste(item)
+                }
+        }
+    }
+
+    private func sectionLabel(_ title: String) -> some View {
+        Text(title.uppercased())
+            .font(.system(size: 9, weight: .semibold))
+            .foregroundStyle(.tertiary)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .padding(.horizontal, 10)
+            .padding(.top, 6)
+            .padding(.bottom, 2)
+    }
+
+    private func emptyState(symbol: String, title: String, caption: String) -> some View {
+        VStack(spacing: 6) {
+            Image(systemName: symbol)
+                .font(.system(size: 22, weight: .light))
+                .foregroundStyle(.tertiary)
+            Text(title)
+                .font(.footnote)
+                .foregroundStyle(.secondary)
+            Text(caption)
+                .font(.caption2)
+                .foregroundStyle(.tertiary)
+                .multilineTextAlignment(.center)
+        }
+        .frame(maxWidth: .infinity)
+        .padding(.vertical, 32)
+        .padding(.horizontal, 16)
+    }
+
     private var footer: some View {
         HStack(spacing: 8) {
             Button {
-                // Close ourselves (the popover) so focus goes back before the
-                // cursor popup positions itself.
-                NSApp.sendAction(#selector(NSPopover.performClose(_:)), to: nil, from: nil)
-                DispatchQueue.main.asyncAfter(deadline: .now() + 0.05) {
-                    appState.popup.show()
-                }
+                // Route through the status-item controller so the popup
+                // inherits the app that was frontmost before the menu bar was
+                // clicked — asking `frontmostApplication` here would answer
+                // "Stash", and auto-paste would go nowhere.
+                appState.statusItemController?.openCursorPopup()
             } label: {
                 Label("Open popup", systemImage: "rectangle.on.rectangle")
                     .font(.system(size: 11))
@@ -104,7 +204,7 @@ struct MenuBarContent: View {
 
             Menu {
                 Button("Settings…") { appState.openSettings() }
-                Button("Clear history") { appState.store.clear() }
+                Button("Clear history…") { appState.confirmAndClearHistory() }
                 Divider()
                 Button("Quit Stash") { NSApp.terminate(nil) }
             } label: {
@@ -122,25 +222,55 @@ struct MenuBarContent: View {
 
 struct MenuClipRow: View {
     let item: ClipItem
-    let index: Int
+    @EnvironmentObject var store: ClipboardStore
     @State private var isHovered = false
 
     var body: some View {
         HStack(spacing: 10) {
-            Image(systemName: item.symbol)
-                .font(.system(size: 11, weight: .medium))
-                .foregroundStyle(.secondary)
-                .frame(width: 18)
+            ClipLeadingVisual(item: item, side: 26)
             VStack(alignment: .leading, spacing: 1) {
                 Text(item.preview)
                     .font(.system(size: 12))
                     .lineLimit(1)
+                    .truncationMode(.tail)
                     .foregroundStyle(.primary)
-                Text(item.createdAt.formatted(.relative(presentation: .named)))
-                    .font(.system(size: 10))
-                    .foregroundStyle(.tertiary)
+                // TimelineView keeps "5 seconds ago" honest while the
+                // popover stays open.
+                TimelineView(.periodic(from: .now, by: 30)) { _ in
+                    Text("\(item.summary) · \(item.createdAt.formatted(.relative(presentation: .named)))")
+                        .font(.system(size: 10))
+                        .foregroundStyle(.tertiary)
+                        .lineLimit(1)
+                }
             }
             Spacer(minLength: 0)
+            ClipFlavorBadge(item: item)
+            if item.isPinned && !isHovered {
+                Image(systemName: "pin.fill")
+                    .font(.system(size: 8, weight: .medium))
+                    .foregroundStyle(.tertiary)
+            }
+            if isHovered {
+                Button {
+                    store.togglePin(item)
+                } label: {
+                    Image(systemName: item.isPinned ? "pin.slash" : "pin")
+                        .font(.system(size: 10, weight: .medium))
+                        .foregroundStyle(.secondary)
+                }
+                .buttonStyle(.plain)
+                .help(item.isPinned ? "Unpin" : "Pin to top")
+
+                Button {
+                    store.remove(item)
+                } label: {
+                    Image(systemName: "trash")
+                        .font(.system(size: 10, weight: .medium))
+                        .foregroundStyle(.secondary)
+                }
+                .buttonStyle(.plain)
+                .help("Remove from history")
+            }
         }
         .padding(.horizontal, 10)
         .padding(.vertical, 6)

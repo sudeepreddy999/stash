@@ -1,7 +1,30 @@
 import SwiftUI
 
-/// The floating popup that appears near the cursor — redesigned as a stack
-/// of independent **blobs** rather than a single container.
+/// Single source of truth for popup geometry. `PopupController` sizes the
+/// NSPanel from these numbers and the SwiftUI layout consumes the same ones,
+/// so the panel frame always matches the rendered content exactly — rows are
+/// fixed-height on purpose (variable-height rows are what previously left a
+/// dead gap at the bottom of the panel).
+enum PopupMetrics {
+    static let panelWidth: CGFloat = 400
+    static let outerPadding: CGFloat = 10
+    static let headerHeight: CGFloat = 34
+    static let stackSpacing: CGFloat = 8
+    static let rowHeight: CGFloat = 60
+    static let rowSpacing: CGFloat = 6
+    static let emptyHeight: CGFloat = 130
+    static let cornerRadius: CGFloat = 14
+
+    static func panelHeight(rows: Int) -> CGFloat {
+        let content: CGFloat = rows == 0
+            ? emptyHeight
+            : CGFloat(rows) * rowHeight + CGFloat(rows - 1) * rowSpacing
+        return outerPadding * 2 + headerHeight + stackSpacing + content
+    }
+}
+
+/// The floating popup that appears near the cursor — a stack of independent
+/// **blobs** rather than a single container.
 ///
 /// Layout:
 /// ```
@@ -16,16 +39,12 @@ import SwiftUI
 /// │ 2  📄 Second clip            │
 /// └──────────────────────────────┘
 ///  …
-///
 /// ```
 ///
-/// Each blob has its own `.regularMaterial` (the native macOS liquid-glass
-/// look), a hairline border, and a subtle shadow.
+/// Each blob gets liquid glass, a subtle shadow, and a fixed height.
 struct PopupView: View {
     @ObservedObject var controller: PopupController
     @EnvironmentObject var store: ClipboardStore
-
-    private let blobCornerRadius: CGFloat = 14
 
     /// Drives the blob entrance animation. Flipped off→on whenever the popup
     /// (re)appears so the blobs cascade in.
@@ -34,7 +53,7 @@ struct PopupView: View {
     private var items: [ClipItem] { controller.visibleItems }
 
     var body: some View {
-        VStack(spacing: 8) {
+        VStack(spacing: PopupMetrics.stackSpacing) {
             headerBlob
 
             if items.isEmpty {
@@ -43,8 +62,8 @@ struct PopupView: View {
                 itemsList
             }
         }
-        .padding(10)
-        .frame(width: 400)
+        .padding(PopupMetrics.outerPadding)
+        .frame(width: PopupMetrics.panelWidth)
         // Full-panel background catches clicks in the gaps between blobs
         // so the popup dismisses on empty-space taps.
         .background(
@@ -71,12 +90,12 @@ struct PopupView: View {
                 .font(.system(size: 12, weight: .semibold))
                 .foregroundStyle(.secondary)
             Spacer()
-            Text("↑↓  ↩  1–5  esc")
+            Text("↑↓  ↩  1–5  ⌫  esc")
                 .font(.system(size: 10))
                 .foregroundStyle(.tertiary)
         }
         .padding(.horizontal, 14)
-        .frame(height: 34)
+        .frame(height: PopupMetrics.headerHeight)
         .shadow(color: .black.opacity(0.18), radius: 6, y: 3)
         .glassEffect()
         // The header doubles as a title bar: grab it to drag the popup around,
@@ -99,24 +118,22 @@ struct PopupView: View {
                 .foregroundStyle(.tertiary)
         }
         .frame(maxWidth: .infinity)
-        .frame(height: 130)
-
+        .frame(height: PopupMetrics.emptyHeight)
         .shadow(color: .black.opacity(0.18), radius: 8, y: 4)
-        .glassEffect(in: RoundedRectangle(cornerRadius: 16))
+        .glassEffect(in: RoundedRectangle(cornerRadius: 16, style: .continuous))
     }
 
     // MARK: - Items
 
     private var itemsList: some View {
-        LazyVStack(spacing: 6) {
+        VStack(spacing: PopupMetrics.rowSpacing) {
             ForEach(Array(items.enumerated()), id: \.element.id) { idx, item in
                 ItemBlob(
                     item: item,
                     index: idx + 1,
-                    isSelected: idx == controller.selection,
-                    cornerRadius: blobCornerRadius
+                    isSelected: idx == controller.selection
                 )
-                .contentShape(RoundedRectangle(cornerRadius: blobCornerRadius, style: .continuous))
+                .contentShape(RoundedRectangle(cornerRadius: PopupMetrics.cornerRadius, style: .continuous))
                 .onTapGesture { controller.paste(at: idx) }
                 .onHover { hovering in
                     if hovering { controller.hover(idx) }
@@ -124,8 +141,6 @@ struct PopupView: View {
                 .modifier(BlobReveal(index: idx, reveal: reveal))
             }
         }
-        .padding(.vertical, 2)
-        .frame(height: controller.listViewportHeight, alignment: .top)
     }
 }
 
@@ -162,13 +177,9 @@ private struct BlobReveal: ViewModifier {
 // MARK: - Item blob
 
 struct ItemBlob: View {
-    private let minBlobHeight: CGFloat = 44
-    private let maxBlobHeight: CGFloat = 74
-
     let item: ClipItem
     let index: Int
     let isSelected: Bool
-    let cornerRadius: CGFloat
 
     var body: some View {
         HStack(spacing: 10) {
@@ -180,54 +191,29 @@ struct ItemBlob: View {
                     .font(.system(size: 10, weight: .semibold, design: .rounded))
                     .foregroundStyle(isSelected ? .white : .secondary)
             }
-            iconView
-            VStack(alignment: .leading, spacing: 1) {
+            ClipLeadingVisual(item: item, side: 32)
+            VStack(alignment: .leading, spacing: 2) {
                 Text(item.preview)
                     .font(.system(size: 12))
                     .foregroundStyle(.primary)
-                    .lineLimit(3)
+                    .lineLimit(2)
                     .truncationMode(.tail)
-                Text(subtitle)
+                Text(item.summary)
                     .font(.system(size: 10))
                     .foregroundStyle(.tertiary)
                     .lineLimit(1)
             }
             .frame(maxWidth: .infinity, alignment: .leading)
-            Spacer(minLength: 0)
+            ClipFlavorBadge(item: item)
         }
-        .padding(.horizontal, 16)
-        .padding(.vertical, 12)
-        .frame(minHeight: minBlobHeight, maxHeight: maxBlobHeight, alignment: .center)
+        .padding(.horizontal, 14)
+        .frame(maxWidth: .infinity)
+        .frame(height: PopupMetrics.rowHeight)
         .shadow(color: .black.opacity(isSelected ? 0.22 : 0.14), radius: isSelected ? 8 : 5, y: 2)
-        .glassEffect()
-    }
-
-    @ViewBuilder
-    private var iconView: some View {
-        if item.kind == .image, let data = item.imageData, let img = NSImage(data: data) {
-            Image(nsImage: img)
-                .resizable()
-                .aspectRatio(contentMode: .fill)
-                .frame(width: 22, height: 22)
-                .clipShape(RoundedRectangle(cornerRadius: 4, style: .continuous))
-        } else {
-            Image(systemName: item.symbol)
-                .font(.system(size: 12, weight: .medium))
-                .foregroundStyle(.secondary)
-                .frame(width: 22, height: 22)
-        }
-    }
-
-    private var subtitle: String {
-        switch item.kind {
-        case .text:
-            let n = (item.text ?? "").count
-            return "Text · \(n) char\(n == 1 ? "" : "s")"
-        case .file:
-            let n = item.filePaths?.count ?? 0
-            return "File\(n == 1 ? "" : "s") · \(n)"
-        case .image:
-            return "Image"
-        }
+        .glassEffect(in: RoundedRectangle(cornerRadius: PopupMetrics.cornerRadius, style: .continuous))
+        .overlay(
+            RoundedRectangle(cornerRadius: PopupMetrics.cornerRadius, style: .continuous)
+                .strokeBorder(Color.accentColor.opacity(isSelected ? 0.7 : 0), lineWidth: 1.5)
+        )
     }
 }

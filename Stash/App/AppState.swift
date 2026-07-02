@@ -1,6 +1,7 @@
 import AppKit
 import Combine
 import Carbon.HIToolbox
+import ServiceManagement
 import SwiftUI
 
 /// Root state graph. Owns every long-lived service and wires them together.
@@ -28,7 +29,30 @@ final class AppState: ObservableObject {
         }
     }
 
+    /// `true` when the system refused the current shortcut (usually because
+    /// another app owns it). Settings shows a warning so the user knows why
+    /// nothing happens and can pick a different preset.
+    @Published private(set) var hotkeyRegistrationFailed = false
+
+    /// Mirrors `SMAppService.mainApp` so Settings can bind a Toggle to it.
+    @Published var launchAtLogin: Bool = SMAppService.mainApp.status == .enabled {
+        didSet {
+            guard launchAtLogin != (SMAppService.mainApp.status == .enabled) else { return }
+            do {
+                if launchAtLogin {
+                    try SMAppService.mainApp.register()
+                } else {
+                    try SMAppService.mainApp.unregister()
+                }
+            } catch {
+                NSLog("Stash: failed to update login item: \(error)")
+                launchAtLogin = SMAppService.mainApp.status == .enabled
+            }
+        }
+    }
+
     private static let hotkeyDefaultsKey = "stash.hotkey"
+    private static let axAlertShownKey = "stash.axAlertShown"
 
     /// Retained so the settings window survives being closed and reopened.
     private var settingsWindow: NSWindow?
@@ -54,7 +78,26 @@ final class AppState: ObservableObject {
     }
 
     private func registerHotkey() {
-        hotkey.register(currentHotkey)
+        hotkeyRegistrationFailed = !hotkey.register(currentHotkey)
+    }
+
+    /// Shared destructive-action guard for the menu-bar menu and Settings.
+    func confirmAndClearHistory() {
+        let count = store.items.count
+        guard count > 0 else { return }
+
+        let alert = NSAlert()
+        alert.messageText = "Clear clipboard history?"
+        alert.informativeText = "This removes all \(count) stashed clip\(count == 1 ? "" : "s"), including pinned ones. This can't be undone."
+        alert.alertStyle = .warning
+        let clear = alert.addButton(withTitle: "Clear History")
+        clear.hasDestructiveAction = true
+        alert.addButton(withTitle: "Cancel")
+
+        NSApp.activate(ignoringOtherApps: true)
+        if alert.runModal() == .alertFirstButtonReturn {
+            store.clear()
+        }
     }
 
     // MARK: - Accessibility
@@ -64,13 +107,17 @@ final class AppState: ObservableObject {
     /// If the user hasn't granted Accessibility we (a) show the system's
     /// standard "add to Accessibility" dialog via `AXIsProcessTrustedWithOptions`,
     /// and (b) also show our own `NSAlert` explaining *why* — with an
-    /// "Open System Settings" deep link. Skipped after the user grants
-    /// permission so it doesn't nag on subsequent launches.
+    /// "Open System Settings" deep link. Our alert appears only once ever;
+    /// declining auto-paste is a valid choice and shouldn't be re-litigated
+    /// on every launch (Settings keeps a re-entry point).
     func requestAccessibilityIfNeeded() {
         if AXIsProcessTrusted() { return }
 
         let promptKey = kAXTrustedCheckOptionPrompt.takeUnretainedValue() as String
         _ = AXIsProcessTrustedWithOptions([promptKey: true] as CFDictionary)
+
+        guard !UserDefaults.standard.bool(forKey: Self.axAlertShownKey) else { return }
+        UserDefaults.standard.set(true, forKey: Self.axAlertShownKey)
 
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.4) {
             self.showAccessibilityAlert()
@@ -111,11 +158,15 @@ final class AppState: ObservableObject {
             return
         }
 
-        let hosting = NSHostingController(rootView: SettingsView().environmentObject(self))
+        let hosting = NSHostingController(
+            rootView: SettingsView()
+                .environmentObject(self)
+                .environmentObject(store)
+        )
         let window = NSWindow(contentViewController: hosting)
         window.title = "Stash Settings"
         window.styleMask = [.titled, .closable, .miniaturizable]
-        window.setContentSize(NSSize(width: 460, height: 380))
+        window.setContentSize(NSSize(width: 460, height: 480))
         window.center()
         window.isReleasedWhenClosed = false
 

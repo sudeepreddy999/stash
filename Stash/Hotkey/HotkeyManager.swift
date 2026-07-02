@@ -44,7 +44,11 @@ final class HotkeyManager {
 
     private static var shared: HotkeyManager?
 
-    func register(_ hotkey: Hotkey) {
+    /// Returns `false` when the system refuses the combination — typically
+    /// because another app already owns it. Callers surface that instead of
+    /// leaving the user with a shortcut that silently does nothing.
+    @discardableResult
+    func register(_ hotkey: Hotkey) -> Bool {
         unregister()
         HotkeyManager.shared = self
 
@@ -58,12 +62,17 @@ final class HotkeyManager {
         }, 1, &eventSpec, nil, &handlerRef)
 
         let hotKeyID = EventHotKeyID(signature: OSType(0x53544153), id: 1) // 'STAS'
-        RegisterEventHotKey(hotkey.keyCode,
-                            hotkey.modifiers,
-                            hotKeyID,
-                            GetApplicationEventTarget(),
-                            0,
-                            &hotKeyRef)
+        let status = RegisterEventHotKey(hotkey.keyCode,
+                                         hotkey.modifiers,
+                                         hotKeyID,
+                                         GetApplicationEventTarget(),
+                                         0,
+                                         &hotKeyRef)
+        if status != noErr || hotKeyRef == nil {
+            NSLog("Stash: failed to register hotkey \(hotkey.display) (status \(status))")
+            return false
+        }
+        return true
     }
 
     func unregister() {

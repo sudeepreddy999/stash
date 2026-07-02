@@ -1,4 +1,5 @@
 import AppKit
+import ApplicationServices
 
 /// Shared paste flow used by both the cursor popup and the menu-bar list.
 ///
@@ -32,10 +33,33 @@ enum PasteEngine {
         monitor.suppressNext()
         item.writeToPasteboard()
         previousApp?.activate(options: [])
-        // Small delay so the target app has time to become frontmost before
-        // we post the synthetic key event.
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.12) {
-            simulatePasteShortcut()
+
+        // Without Accessibility the synthetic ⌘V would be silently dropped —
+        // the clip is on the pasteboard and focus is restored, so the user
+        // just presses ⌘V themselves.
+        guard AXIsProcessTrusted() else { return }
+
+        if let previousApp {
+            waitForActivation(of: previousApp, attemptsLeft: 20)
+        } else {
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.12) {
+                simulatePasteShortcut()
+            }
+        }
+    }
+
+    /// Post ⌘V once the target app is actually frontmost instead of after a
+    /// fixed delay — slow apps used to receive the event too early (or a
+    /// different app received it). Gives up after ~1 s and posts anyway so a
+    /// hung target can't swallow the paste forever.
+    @MainActor
+    private static func waitForActivation(of app: NSRunningApplication, attemptsLeft: Int) {
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.05) {
+            if app.isActive || app.isTerminated || attemptsLeft <= 0 {
+                simulatePasteShortcut()
+            } else {
+                waitForActivation(of: app, attemptsLeft: attemptsLeft - 1)
+            }
         }
     }
 }

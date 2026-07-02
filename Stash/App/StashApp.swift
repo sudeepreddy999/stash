@@ -16,6 +16,7 @@ struct StashApp: App {
         Settings {
             SettingsView()
                 .environmentObject(appDelegate.appState)
+                .environmentObject(appDelegate.appState.store)
         }
     }
 }

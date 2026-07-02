@@ -14,7 +14,7 @@ document tells you exactly where to look.
                                                │ polled every 0.4s
                                                ▼
                                       ┌─────────────────┐         ┌────────────┐
-                                      │ClipboardMonitor │────►────│ClipboardStore│──► history.json
+                                      │ClipboardMonitor │────►────│ClipboardStore│──► history.json + images/
                                       └────────┬────────┘         └─────┬──────┘
                                                │                        │
                                                │ capturePulse++         │ items[]
@@ -48,18 +48,33 @@ document tells you exactly where to look.
 ### `Stash/Clipboard/` — capture + storage
 
 - **`ClipItem.swift`** — The `Codable` model for a clip. Three kinds:
-  `.text`, `.file`, `.image`. `fromPasteboard(_:)` reads whichever type
-  is on the pasteboard; `writeToPasteboard()` restores it. Change here if
-  you want to add a new clip kind (RTF, colors, …).
-- **`ClipboardStore.swift`** — The on-disk history. Prepends new items,
-  caps at 100, dedupes against the most recent, atomically writes JSON
-  to `~/Library/Application Support/Stash/history.json`. `capturePulse`
-  is a monotonically increasing counter that the menu bar icon watches
-  to trigger the bounce animation.
+  `.text`, `.file`, `.image`. Text clips also expose a computed
+  `textFlavor` (plain / code / link / color / OTP) that drives the row
+  icon, subtitle, and OTP badge. `fromPasteboard(_:)` reads whichever type
+  is on the pasteboard (image bytes go straight to `ClipStorage`, only
+  metadata stays on the item); `writeToPasteboard()` restores it, resolving
+  security-scoped bookmarks for file clips so moved files still paste.
+  Change here if you want to add a new clip kind (RTF, …).
+- **`ClipStorage.swift`** — Paths + file I/O for the on-disk layout:
+  `history.json` (metadata manifest) and `images/<UUID>.png` (one file per
+  image clip). Also prunes orphaned image files on launch.
+- **`ClipVisuals.swift`** — UI-side helpers: bounded thumbnail cache
+  (downsampled via ImageIO, the full bitmap is never decoded), Finder file
+  icons, hex-color parsing, plus the shared `ClipLeadingVisual` /
+  `ClipFlavorBadge` row components used by both the popup and the menu bar
+  list.
+- **`ClipboardStore.swift`** — The history. Prepends new items, caps at
+  100, moves re-copied duplicates to the top (image dedup uses a SHA-256
+  content hash), deletes image files when their item leaves history, and
+  atomically writes the manifest. Migrates legacy `history.json` files that
+  inlined base64 image bytes. `capturePulse` is a monotonically increasing
+  counter that the menu bar icon watches to trigger the bounce animation.
 - **`ClipboardMonitor.swift`** — Polls `NSPasteboard.changeCount` every
   0.4 s. When it changes, extracts a `ClipItem` and hands it to the store.
-  `suppressNext()` is called by the popup right before *we* write to the
-  pasteboard, so re-pasting an old clip doesn't create a new history entry.
+  Skips content marked `org.nspasteboard.ConcealedType` / `TransientType`
+  (the de-facto standard used by password managers). `suppressNext()` is
+  called by the popup right before *we* write to the pasteboard, so
+  re-pasting an old clip doesn't create a new history entry.
 
 ### `Stash/Hotkey/` — the global shortcut
 
@@ -206,17 +221,12 @@ compiled — everything under `Stash/` ends up in the build.
 
 | Purpose | Path |
 |---------|------|
-| History | `~/Library/Application Support/Stash/history.json` |
+| History manifest | `~/Library/Application Support/Stash/history.json` |
+| Image clips | `~/Library/Application Support/Stash/images/<UUID>.png` |
 | Preferences | `~/Library/Preferences/com.sudeepogireddy.Stash.plist` (via `UserDefaults`) |
 
 ## Known limitations / MVP shortcuts
 
-- No search, no pinning, no tagging.
-- Only the last 100 clips are kept.
-- Images are stored inline (PNG) inside the JSON file — fine for a few
-  screenshots, wasteful for hundreds. Migrate to a `blobs/` sidecar
-  directory when you notice the file getting large.
-- File clips remember the *path*, not a security-scoped bookmark. If the
-  file moves after being copied, re-pasting will fail. Fixed once you
-  turn the sandbox back on with proper bookmarks.
+- No tagging, no RTF capture.
+- History cap is configurable (50–500) in Settings; pinned clips are exempt.
 - The menubar bounce assumes `.symbolEffect` is available (macOS 14+).

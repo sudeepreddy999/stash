@@ -30,13 +30,8 @@ final class PopupController: ObservableObject {
     private var localKeyMonitor: Any?
     private var storeSubscription: AnyCancellable?
 
-    // Sizing — tuned for the blob layout (header + 5 item blobs).
-    private let panelWidth: CGFloat = 400
-    private let headerBlockHeight: CGFloat = 42     // header blob + spacing below
-    private let rowViewportHeight: CGFloat = 80     // one visible row slot in the viewport (includes inter-row spacing)
-    private let panelChrome: CGFloat = 20           // 10 top + 10 bottom padding
-    private let emptyHeight: CGFloat = 210
-
+    // Geometry lives in `PopupMetrics` (shared with the SwiftUI layout so
+    // the panel frame always matches the rendered content).
     private let initialLimit = 5
 
     unowned let store: ClipboardStore
@@ -53,20 +48,24 @@ final class PopupController: ObservableObject {
         Array(store.items.prefix(initialLimit))
     }
 
-    var listViewportHeight: CGFloat {
-        guard !store.items.isEmpty else { return 0 }
-        let rows = min(CGFloat(visibleItems.count), CGFloat(initialLimit))
-        return rows * rowViewportHeight
-    }
-
     // MARK: - Show / hide
 
     func toggle() {
         isVisible ? hide() : show()
     }
 
-    func show() {
-        previousApp = NSWorkspace.shared.frontmostApplication
+    /// `focusTarget` overrides where auto-paste should return focus. Callers
+    /// that already know the user's "real" app (the menu-bar popover captures
+    /// it when the status item is clicked) pass it here; otherwise we take
+    /// the current frontmost app — unless that's Stash itself, which would
+    /// make the eventual ⌘V a no-op.
+    func show(returningFocusTo focusTarget: NSRunningApplication? = nil) {
+        if let focusTarget {
+            previousApp = focusTarget
+        } else if let front = NSWorkspace.shared.frontmostApplication,
+                  front.bundleIdentifier != Bundle.main.bundleIdentifier {
+            previousApp = front
+        }
         selection = 0
         revealToken &+= 1
 
@@ -93,18 +92,27 @@ final class PopupController: ObservableObject {
         subscribeStore()
     }
 
-    func hide() {
+    /// `restoreFocus` re-activates the app that was frontmost before the
+    /// popup opened. Pass `false` when the dismissal was caused by the user
+    /// clicking into some *other* app — re-activating the old app then would
+    /// steal focus from the one they just clicked.
+    func hide(restoreFocus: Bool = true) {
         removeMonitors()
         storeSubscription = nil
-        guard let panel, panel.isVisible else { return }
-        NSAnimationContext.runAnimationGroup({ ctx in
-            ctx.duration = 0.10
-            panel.animator().alphaValue = 0
-        }, completionHandler: {
-            panel.orderOut(nil)
-        })
-        previousApp?.activate(options: [])
+        let prev = previousApp
         previousApp = nil
+
+        if let panel, panel.isVisible {
+            NSAnimationContext.runAnimationGroup({ ctx in
+                ctx.duration = 0.10
+                panel.animator().alphaValue = 0
+            }, completionHandler: {
+                panel.orderOut(nil)
+            })
+        }
+        if restoreFocus {
+            prev?.activate(options: [])
+        }
     }
 
     // MARK: - Selection & paste
@@ -122,6 +130,14 @@ final class PopupController: ObservableObject {
 
     func pasteSelected() {
         paste(at: selection)
+    }
+
+    /// Remove the selected clip without dismissing — the store subscription
+    /// reflows and resizes the panel.
+    func deleteSelected() {
+        let items = visibleItems
+        guard selection >= 0, selection < items.count else { return }
+        store.remove(items[selection])
     }
 
     func paste(at index: Int) {
@@ -145,10 +161,10 @@ final class PopupController: ObservableObject {
     private func buildPanel() -> KeyablePanel {
         let root = PopupView(controller: self).environmentObject(store)
         let hosting = NSHostingView(rootView: root)
-        hosting.frame = NSRect(x: 0, y: 0, width: panelWidth, height: computedHeight())
+        hosting.frame = NSRect(x: 0, y: 0, width: PopupMetrics.panelWidth, height: computedHeight())
 
         let p = KeyablePanel(
-            contentRect: NSRect(x: 0, y: 0, width: panelWidth, height: computedHeight()),
+            contentRect: NSRect(x: 0, y: 0, width: PopupMetrics.panelWidth, height: computedHeight()),
             styleMask: [.borderless, .fullSizeContentView],
             backing: .buffered,
             defer: false
@@ -166,9 +182,7 @@ final class PopupController: ObservableObject {
     }
 
     private func computedHeight() -> CGFloat {
-        if store.items.isEmpty { return emptyHeight }
-        let rows = min(CGFloat(visibleItems.count), CGFloat(initialLimit))
-        return headerBlockHeight + rows * rowViewportHeight + panelChrome
+        PopupMetrics.panelHeight(rows: visibleItems.count)
     }
 
     private func computeFrame() -> NSRect {
@@ -177,12 +191,13 @@ final class PopupController: ObservableObject {
         let screen = NSScreen.screens.first(where: { $0.frame.contains(mouse) }) ?? NSScreen.main!
         let visible = screen.visibleFrame
 
+        let width = PopupMetrics.panelWidth
         var origin = NSPoint(x: mouse.x + 12, y: mouse.y - height - 12)
-        if origin.x + panelWidth > visible.maxX - 8 { origin.x = visible.maxX - panelWidth - 8 }
+        if origin.x + width > visible.maxX - 8 { origin.x = visible.maxX - width - 8 }
         if origin.x < visible.minX + 8 { origin.x = visible.minX + 8 }
         if origin.y < visible.minY + 8 { origin.y = mouse.y + 20 }
         if origin.y + height > visible.maxY - 8 { origin.y = visible.maxY - height - 8 }
-        return NSRect(origin: origin, size: NSSize(width: panelWidth, height: height))
+        return NSRect(origin: origin, size: NSSize(width: width, height: height))
     }
 
     /// Animate the panel to fit the current visible item count. Anchors on the
@@ -240,7 +255,9 @@ final class PopupController: ObservableObject {
                 // panel (e.g. grabbing the header to drag) surface here too — and
                 // dismissing on those is the drag-gets-cancelled bug.
                 if panel.frame.contains(location) { return }
-                self.hide()
+                // The click already went to another app — don't fight it for
+                // focus by re-activating the app the popup was opened over.
+                self.hide(restoreFocus: false)
             }
         }
 
@@ -272,8 +289,15 @@ final class PopupController: ObservableObject {
             moveSelection(by: 1); return true
         case 126:
             moveSelection(by: -1); return true
+        case 51:
+            deleteSelected(); return true
         default:
-            if let ch = event.charactersIgnoringModifiers?.first,
+            // Bare digits only — ⌘1 etc. should keep their normal meaning.
+            let mods = event.modifierFlags
+                .intersection(.deviceIndependentFlagsMask)
+                .subtracting(.numericPad)
+            if mods.isEmpty,
+               let ch = event.charactersIgnoringModifiers?.first,
                let d = ch.wholeNumberValue,
                (1...initialLimit).contains(d) {
                 paste(at: d - 1)
