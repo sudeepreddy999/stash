@@ -1,4 +1,5 @@
 import SwiftUI
+import AppKit
 
 /// Single source of truth for popup geometry. `PopupController` sizes the
 /// NSPanel from these numbers and the SwiftUI layout consumes the same ones,
@@ -150,11 +151,14 @@ struct PopupView: View {
             // sits invisibly exactly over the selected row (same height, same
             // offset), so expanding reads as that row growing into place.
             ExpandedItemCard(
-                item: items[selected],
+                item: controller.expandedItem ?? items[selected],
                 index: selected + 1,
+                selection: controller.expandedSelection,
                 onBack: { controller.collapse() },
                 onPaste: { controller.pasteSelected() },
-                onTogglePin: { controller.togglePinSelected() }
+                onCopy: { controller.copyExpandedSelection() },
+                onTogglePin: { controller.togglePinSelected() },
+                onSelectionChange: { controller.setExpandedSelection($0) }
             )
             .frame(height: controller.isExpanded ? areaHeight : PopupMetrics.rowHeight)
             .offset(y: controller.isExpanded ? 0 : collapsedOffset)
@@ -318,9 +322,20 @@ struct ItemBlob: View {
 struct ExpandedItemCard: View {
     let item: ClipItem
     let index: Int
+    /// The user's live text selection inside this card ("" when nothing is
+    /// highlighted). Drives the sub-selection copy/paste affordances.
+    var selection: String = ""
     var onBack: () -> Void
     var onPaste: () -> Void
+    var onCopy: () -> Void = {}
     var onTogglePin: () -> Void = {}
+    var onSelectionChange: (String) -> Void = { _ in }
+
+    /// Brief "Copied" confirmation after the copy button is pressed.
+    @State private var copied = false
+
+    private var hasSelection: Bool { !selection.isEmpty }
+    private var isText: Bool { item.kind == .text }
 
     private static let timeFormatter: RelativeDateTimeFormatter = {
         let f = RelativeDateTimeFormatter()
@@ -333,6 +348,12 @@ struct ExpandedItemCard: View {
             header
             contents(for: item)
                 .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+            // Text clips get a dedicated action bar so a highlighted portion
+            // can be copied or pasted on its own. Other kinds keep Paste in the
+            // header (there's nothing to sub-select).
+            if isText {
+                selectionBar
+            }
         }
         .padding(14)
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
@@ -368,8 +389,57 @@ struct ExpandedItemCard: View {
             Spacer(minLength: 6)
             pinPill
             actionPill(symbol: "arrow.left", label: "Back", prominent: false, action: onBack)
-            actionPill(symbol: "return", label: "Paste", prominent: true, action: onPaste)
+            if !isText {
+                actionPill(symbol: "return", label: "Paste", prominent: true, action: onPaste)
+            }
         }
+    }
+
+    /// Action bar under a text clip: reflects the current selection and offers
+    /// copy/paste of just that portion (or the whole clip when nothing is
+    /// highlighted).
+    private var selectionBar: some View {
+        HStack(spacing: 8) {
+            Image(systemName: hasSelection ? "text.cursor" : "hand.point.up.left")
+                .font(.system(size: 10, weight: .medium))
+                .foregroundStyle(.tertiary)
+            Text(selectionStatus)
+                .font(.system(size: 10))
+                .foregroundStyle(hasSelection ? .secondary : .tertiary)
+                .lineLimit(1)
+            Spacer(minLength: 6)
+            Button {
+                onCopy()
+                flashCopied()
+            } label: {
+                pillContent(symbol: copied ? "checkmark" : "doc.on.doc",
+                            label: copied ? "Copied" : "Copy",
+                            prominent: false)
+            }
+            .buttonStyle(.plain)
+            .disabled(!hasSelection)
+            .opacity(hasSelection ? 1 : 0.4)
+            .help("Copy the highlighted text")
+
+            Button(action: onPaste) {
+                pillContent(symbol: "return",
+                            label: hasSelection ? "Paste part" : "Paste all",
+                            prominent: true)
+            }
+            .buttonStyle(.plain)
+            .help(hasSelection ? "Paste just the highlighted text" : "Paste the whole clip")
+        }
+    }
+
+    private var selectionStatus: String {
+        guard hasSelection else { return "Select text to grab just a part" }
+        let n = selection.count
+        return "\(n) character\(n == 1 ? "" : "s") selected"
+    }
+
+    private func flashCopied() {
+        copied = true
+        DispatchQueue.main.asyncAfter(deadline: .now() + 1.2) { copied = false }
     }
 
     /// Icon-only capsule so the two labelled pills stay the visual anchors.
@@ -391,34 +461,35 @@ struct ExpandedItemCard: View {
 
     private func actionPill(symbol: String, label: String, prominent: Bool, action: @escaping () -> Void) -> some View {
         Button(action: action) {
-            HStack(spacing: 4) {
-                Image(systemName: symbol)
-                    .font(.system(size: 9, weight: .semibold))
-                Text(label)
-                    .font(.system(size: 10, weight: .semibold))
-            }
-            .padding(.horizontal, 8)
-            .padding(.vertical, 5)
-            .background(
-                Capsule().fill(prominent ? Color.accentColor.opacity(0.9) : Color.secondary.opacity(0.18))
-            )
-            .foregroundStyle(prominent ? Color.white : Color.secondary)
+            pillContent(symbol: symbol, label: label, prominent: prominent)
         }
         .buttonStyle(.plain)
+    }
+
+    private func pillContent(symbol: String, label: String, prominent: Bool) -> some View {
+        HStack(spacing: 4) {
+            Image(systemName: symbol)
+                .font(.system(size: 9, weight: .semibold))
+            Text(label)
+                .font(.system(size: 10, weight: .semibold))
+        }
+        .padding(.horizontal, 8)
+        .padding(.vertical, 5)
+        .background(
+            Capsule().fill(prominent ? Color.accentColor.opacity(0.9) : Color.secondary.opacity(0.18))
+        )
+        .foregroundStyle(prominent ? Color.white : Color.secondary)
     }
 
     @ViewBuilder
     private func contents(for item: ClipItem) -> some View {
         switch item.kind {
         case .text:
-            ScrollView {
-                Text(item.text ?? "")
-                    .font(.system(size: 12, design: item.textFlavor == .code ? .monospaced : .default))
-                    .foregroundStyle(.primary)
-                    .textSelection(.enabled)
-                    .frame(maxWidth: .infinity, alignment: .leading)
-                    .padding(.trailing, 4)
-            }
+            SelectableTextView(
+                text: item.text ?? "",
+                isMonospaced: item.textFlavor == .code,
+                onSelectionChange: onSelectionChange
+            )
         case .image:
             if let thumb = ClipVisuals.thumbnail(for: item, side: 640) {
                 ScrollView {
@@ -458,5 +529,80 @@ struct ExpandedItemCard: View {
             .font(.system(size: 12))
             .foregroundStyle(.secondary)
             .frame(maxWidth: .infinity, maxHeight: .infinity)
+    }
+}
+
+// MARK: - Selectable text
+
+/// A read-only, mouse-selectable text view for the expanded card. SwiftUI's
+/// `Text(...).textSelection(.enabled)` renders selectable text but never hands
+/// the selected substring back, which is exactly what the sub-selection
+/// copy/paste flow needs — so we drop down to `NSTextView` and report the
+/// current selection up on every change.
+struct SelectableTextView: NSViewRepresentable {
+    let text: String
+    let isMonospaced: Bool
+    var onSelectionChange: (String) -> Void
+
+    func makeCoordinator() -> Coordinator { Coordinator(onSelectionChange: onSelectionChange) }
+
+    func makeNSView(context: Context) -> NSScrollView {
+        let scroll = NSTextView.scrollableTextView()
+        scroll.drawsBackground = false
+        scroll.hasVerticalScroller = true
+
+        guard let textView = scroll.documentView as? NSTextView else { return scroll }
+        textView.isEditable = false
+        textView.isSelectable = true
+        textView.drawsBackground = false
+        textView.textColor = .labelColor
+        textView.textContainerInset = NSSize(width: 0, height: 2)
+        textView.font = Self.font(monospaced: isMonospaced)
+        textView.string = text
+        // Attach the delegate *after* the initial string is set so seeding the
+        // content doesn't fire a spurious empty-selection callback.
+        textView.delegate = context.coordinator
+        return scroll
+    }
+
+    func updateNSView(_ scroll: NSScrollView, context: Context) {
+        context.coordinator.onSelectionChange = onSelectionChange
+        guard let textView = scroll.documentView as? NSTextView else { return }
+
+        let newFont = Self.font(monospaced: isMonospaced)
+        if textView.font != newFont { textView.font = newFont }
+
+        // Only reset when the clip itself changed — never on every re-render, or
+        // an in-progress selection would be wiped out. The guarded assignment
+        // resets the caret, so suppress the resulting delegate callback.
+        if textView.string != text {
+            context.coordinator.isProgrammaticChange = true
+            textView.string = text
+            textView.setSelectedRange(NSRange(location: 0, length: 0))
+            context.coordinator.isProgrammaticChange = false
+        }
+    }
+
+    private static func font(monospaced: Bool) -> NSFont {
+        monospaced
+            ? .monospacedSystemFont(ofSize: 12, weight: .regular)
+            : .systemFont(ofSize: 12)
+    }
+
+    final class Coordinator: NSObject, NSTextViewDelegate {
+        var onSelectionChange: (String) -> Void
+        var isProgrammaticChange = false
+
+        init(onSelectionChange: @escaping (String) -> Void) {
+            self.onSelectionChange = onSelectionChange
+        }
+
+        func textViewDidChangeSelection(_ notification: Notification) {
+            guard !isProgrammaticChange,
+                  let textView = notification.object as? NSTextView else { return }
+            let range = textView.selectedRange()
+            let selected = (textView.string as NSString).substring(with: range)
+            onSelectionChange(selected)
+        }
     }
 }

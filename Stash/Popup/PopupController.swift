@@ -29,11 +29,30 @@ final class PopupController: ObservableObject {
     /// show/hide, so `onAppear` alone only fires once.
     @Published private(set) var revealToken = 0
 
+    /// Identity of the clip currently blown up. Tracked by id (not list
+    /// position) so history reorders — a fresh copy, a pin, or grabbing a
+    /// sub-selection that lands back in history — never swap the card out from
+    /// under the user.
+    @Published private(set) var expandedItemID: UUID?
+
+    /// The user's current text selection inside the expanded card, or "" when
+    /// nothing is highlighted. Lets ↩ and the Paste button act on just the
+    /// selected portion instead of the whole clip.
+    @Published private(set) var expandedSelection = ""
+
     private var panel: KeyablePanel?
     private var previousApp: NSRunningApplication?
     private var outsideClickMonitor: Any?
     private var localKeyMonitor: Any?
     private var storeSubscription: AnyCancellable?
+
+    /// Mouse location captured when we deliberately don't want a hover to move
+    /// the selection (collapsing back to the list, or first appearing). While
+    /// the pointer stays here we ignore hovers, because SwiftUI fires a spurious
+    /// `onHover` for the row under the *stationary* cursor the moment the list
+    /// re-enters hit testing — which would otherwise yank the selection off the
+    /// clip the user just expanded. Cleared as soon as the pointer really moves.
+    private var hoverSuppressAnchor: NSPoint?
 
     // Geometry lives in `PopupMetrics` (shared with the SwiftUI layout so
     // the panel frame always matches the rendered content).
@@ -56,6 +75,13 @@ final class PopupController: ObservableObject {
         Array((store.pinnedItems + store.recentItems).prefix(initialLimit))
     }
 
+    /// The blown-up clip, resolved by identity. Falls back to `nil` only if it
+    /// has left the list entirely (the store subscription then collapses).
+    var expandedItem: ClipItem? {
+        guard let id = expandedItemID else { return nil }
+        return visibleItems.first { $0.id == id }
+    }
+
     // MARK: - Show / hide
 
     func toggle() {
@@ -76,7 +102,10 @@ final class PopupController: ObservableObject {
         }
         selection = 0
         isExpanded = false
+        expandedItemID = nil
+        expandedSelection = ""
         revealToken &+= 1
+        hoverSuppressAnchor = NSEvent.mouseLocation
 
         if panel == nil { panel = buildPanel() }
         guard let panel else { return }
@@ -136,6 +165,8 @@ final class PopupController: ObservableObject {
     /// are readable. No-op when there's nothing selected or it's already open.
     func expandSelected() {
         guard !isExpanded, selection >= 0, selection < visibleItems.count else { return }
+        expandedItemID = visibleItems[selection].id
+        expandedSelection = ""
         withAnimation(.spring(response: 0.4, dampingFraction: 0.85)) {
             isExpanded = true
         }
@@ -143,6 +174,11 @@ final class PopupController: ObservableObject {
 
     func collapse() {
         guard isExpanded else { return }
+        // Pin the selection in place: the list is about to become hit-testable
+        // again under a stationary cursor, and we don't want that to reselect.
+        hoverSuppressAnchor = NSEvent.mouseLocation
+        expandedItemID = nil
+        expandedSelection = ""
         withAnimation(.spring(response: 0.4, dampingFraction: 0.85)) {
             isExpanded = false
         }
@@ -150,11 +186,38 @@ final class PopupController: ObservableObject {
 
     func hover(_ index: Int) {
         guard index >= 0, index < visibleItems.count else { return }
+        // A hover that lands without the pointer having moved since we set the
+        // anchor is the layout-driven spurious one — ignore it so the expanded
+        // clip stays selected. Any real movement clears the anchor for good.
+        if let anchor = hoverSuppressAnchor {
+            let now = NSEvent.mouseLocation
+            if abs(now.x - anchor.x) < 1, abs(now.y - anchor.y) < 1 { return }
+            hoverSuppressAnchor = nil
+        }
         selection = index
     }
 
     func pasteSelected() {
-        paste(at: selection)
+        // In the expanded card, a highlighted sub-selection wins over the whole
+        // clip — this is the "grab just this part and drop it where I was" flow.
+        if isExpanded, !expandedSelection.isEmpty {
+            pasteText(expandedSelection)
+        } else {
+            paste(at: selection)
+        }
+    }
+
+    func setExpandedSelection(_ text: String) {
+        guard expandedSelection != text else { return }
+        expandedSelection = text
+    }
+
+    /// Copy the current sub-selection to the clipboard without dismissing, so
+    /// the user can keep grabbing more. The monitor picks it up into history a
+    /// beat later just like any other copy.
+    func copyExpandedSelection() {
+        guard isExpanded, !expandedSelection.isEmpty else { return }
+        ClipItem(kind: .text, text: expandedSelection).writeToPasteboard()
     }
 
     /// Remove the selected clip without dismissing — the store subscription
@@ -199,6 +262,15 @@ final class PopupController: ObservableObject {
         let prev = previousApp
         previousApp = nil
         PasteEngine.paste(item, restoringFocusTo: prev, monitor: monitor)
+    }
+
+    /// Paste an arbitrary string — a sub-selection of an expanded clip. It's
+    /// stashed as its own clip first, so "grab part of this" also keeps that
+    /// part in history for next time.
+    private func pasteText(_ text: String) {
+        let item = ClipItem(kind: .text, text: text)
+        store.add(item)
+        paste(item)
     }
 
     // MARK: - Panel construction & sizing
@@ -277,10 +349,16 @@ final class PopupController: ObservableObject {
                 guard let self else { return }
 
                 if self.isExpanded {
-                    // The clip being read shifted out from under us (or the
-                    // list emptied) — drop back to the list rather than show a
-                    // different clip in the expanded card.
-                    if self.selection >= self.visibleItems.count {
+                    // Keep the blown-up card glued to its clip by identity: a
+                    // new capture (or a grabbed sub-selection landing in
+                    // history) reorders the list, and we want the same clip to
+                    // stay on screen — and the selection index to track it so
+                    // collapsing animates back to the right row. If the clip is
+                    // gone entirely, drop back to the list.
+                    if let id = self.expandedItemID,
+                       let idx = self.visibleItems.firstIndex(where: { $0.id == id }) {
+                        self.selection = idx
+                    } else {
                         self.collapse()
                     }
                 } else {
