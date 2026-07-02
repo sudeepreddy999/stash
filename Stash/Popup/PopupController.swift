@@ -49,8 +49,11 @@ final class PopupController: ObservableObject {
 
     var isVisible: Bool { panel?.isVisible ?? false }
 
+    /// Pinned clips float to the top — same ordering the menu-bar list uses —
+    /// so a pinned item is always reachable from the popup regardless of how
+    /// much has been copied since.
     var visibleItems: [ClipItem] {
-        Array(store.items.prefix(initialLimit))
+        Array((store.pinnedItems + store.recentItems).prefix(initialLimit))
     }
 
     // MARK: - Show / hide
@@ -160,6 +163,26 @@ final class PopupController: ObservableObject {
         let items = visibleItems
         guard selection >= 0, selection < items.count else { return }
         store.remove(items[selection])
+    }
+
+    func togglePinSelected() {
+        togglePin(at: selection)
+    }
+
+    /// Pin/unpin a clip without dismissing. Pinning floats the item to the top
+    /// (via `visibleItems`), so we follow it to its new index to keep the
+    /// selection glued to the clip the user acted on. The shared store persists
+    /// and republishes, so the menu-bar list reflects the change immediately.
+    func togglePin(at index: Int) {
+        let items = visibleItems
+        guard index >= 0, index < items.count else { return }
+        let target = items[index]
+        withAnimation(.spring(response: 0.35, dampingFraction: 0.85)) {
+            store.togglePin(target)
+        }
+        if let newIndex = visibleItems.firstIndex(where: { $0.id == target.id }) {
+            selection = newIndex
+        }
     }
 
     func paste(at index: Int) {
@@ -331,14 +354,18 @@ final class PopupController: ObservableObject {
             if !isExpanded { deleteSelected() }
             return true
         default:
-            // Bare digits only — ⌘1 etc. should keep their normal meaning.
+            // Bare keys only — ⌘1, ⌘P etc. should keep their normal meaning.
             let mods = event.modifierFlags
                 .intersection(.deviceIndependentFlagsMask)
                 .subtracting(.numericPad)
-            if mods.isEmpty,
-               let ch = event.charactersIgnoringModifiers?.first,
-               let d = ch.wholeNumberValue,
-               (1...initialLimit).contains(d) {
+            guard mods.isEmpty,
+                  let ch = event.charactersIgnoringModifiers?.first else { return false }
+            // P pins/unpins the current selection (works in either state).
+            if ch == "p" || ch == "P" {
+                togglePinSelected()
+                return true
+            }
+            if let d = ch.wholeNumberValue, (1...initialLimit).contains(d) {
                 paste(at: d - 1)
                 return true
             }

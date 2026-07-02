@@ -96,7 +96,7 @@ struct PopupView: View {
                 .font(.system(size: 12, weight: .semibold))
                 .foregroundStyle(.secondary)
             Spacer()
-            Text(controller.isExpanded ? "←  back    ↩  paste    esc" : "↑↓  →  ↩  1–5  ⌫  esc")
+            Text(controller.isExpanded ? "←  back    P  pin    ↩  paste    esc" : "↑↓  →  ↩  1–5  P  ⌫  esc")
                 .font(.system(size: 10))
                 .foregroundStyle(.tertiary)
                 .contentTransition(.opacity)
@@ -153,7 +153,8 @@ struct PopupView: View {
                 item: items[selected],
                 index: selected + 1,
                 onBack: { controller.collapse() },
-                onPaste: { controller.pasteSelected() }
+                onPaste: { controller.pasteSelected() },
+                onTogglePin: { controller.togglePinSelected() }
             )
             .frame(height: controller.isExpanded ? areaHeight : PopupMetrics.rowHeight)
             .offset(y: controller.isExpanded ? 0 : collapsedOffset)
@@ -184,7 +185,8 @@ struct PopupView: View {
                 ItemBlob(
                     item: item,
                     index: idx + 1,
-                    isSelected: idx == controller.selection
+                    isSelected: idx == controller.selection,
+                    onTogglePin: { controller.togglePin(at: idx) }
                 )
                 .contentShape(RoundedRectangle(cornerRadius: PopupMetrics.cornerRadius, style: .continuous))
                 .onTapGesture { controller.paste(at: idx) }
@@ -246,6 +248,7 @@ struct ItemBlob: View {
     let item: ClipItem
     let index: Int
     let isSelected: Bool
+    var onTogglePin: () -> Void = {}
 
     var body: some View {
         HStack(spacing: 10) {
@@ -271,6 +274,7 @@ struct ItemBlob: View {
             }
             .frame(maxWidth: .infinity, alignment: .leading)
             ClipFlavorBadge(item: item)
+            pinAccessory
         }
         .padding(.horizontal, 14)
         .frame(maxWidth: .infinity)
@@ -281,6 +285,28 @@ struct ItemBlob: View {
             RoundedRectangle(cornerRadius: PopupMetrics.cornerRadius, style: .continuous)
                 .strokeBorder(Color.accentColor.opacity(isSelected ? 0.7 : 0), lineWidth: 1.5)
         )
+    }
+
+    /// The selected blob exposes a tappable pin toggle (mirroring the ⇧-free
+    /// `P` shortcut); every other pinned blob keeps a static pin so you can
+    /// tell at a glance which clips are pinned to the top.
+    @ViewBuilder
+    private var pinAccessory: some View {
+        if isSelected {
+            Button(action: onTogglePin) {
+                Image(systemName: item.isPinned ? "pin.slash.fill" : "pin.fill")
+                    .font(.system(size: 11, weight: .semibold))
+                    .foregroundStyle(item.isPinned ? Color.accentColor : Color.secondary)
+                    .frame(width: 20, height: 20)
+                    .contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
+            .help(item.isPinned ? "Unpin" : "Pin to top")
+        } else if item.isPinned {
+            Image(systemName: "pin.fill")
+                .font(.system(size: 10, weight: .semibold))
+                .foregroundStyle(Color.accentColor.opacity(0.8))
+        }
     }
 }
 
@@ -294,6 +320,7 @@ struct ExpandedItemCard: View {
     let index: Int
     var onBack: () -> Void
     var onPaste: () -> Void
+    var onTogglePin: () -> Void = {}
 
     private static let timeFormatter: RelativeDateTimeFormatter = {
         let f = RelativeDateTimeFormatter()
@@ -339,9 +366,27 @@ struct ExpandedItemCard: View {
                     .lineLimit(1)
             }
             Spacer(minLength: 6)
+            pinPill
             actionPill(symbol: "arrow.left", label: "Back", prominent: false, action: onBack)
             actionPill(symbol: "return", label: "Paste", prominent: true, action: onPaste)
         }
+    }
+
+    /// Icon-only capsule so the two labelled pills stay the visual anchors.
+    /// Fills with the accent when pinned so the state reads even without a label.
+    private var pinPill: some View {
+        Button(action: onTogglePin) {
+            Image(systemName: item.isPinned ? "pin.slash" : "pin")
+                .font(.system(size: 10, weight: .semibold))
+                .padding(.horizontal, 7)
+                .padding(.vertical, 5)
+                .background(
+                    Capsule().fill(item.isPinned ? Color.accentColor.opacity(0.9) : Color.secondary.opacity(0.18))
+                )
+                .foregroundStyle(item.isPinned ? Color.white : Color.secondary)
+        }
+        .buttonStyle(.plain)
+        .help(item.isPinned ? "Unpin" : "Pin to top")
     }
 
     private func actionPill(symbol: String, label: String, prominent: Bool, action: @escaping () -> Void) -> some View {
