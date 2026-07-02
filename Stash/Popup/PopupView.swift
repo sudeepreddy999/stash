@@ -15,11 +15,17 @@ enum PopupMetrics {
     static let emptyHeight: CGFloat = 130
     static let cornerRadius: CGFloat = 14
 
-    static func panelHeight(rows: Int) -> CGFloat {
-        let content: CGFloat = rows == 0
+    /// Height of the items area alone (the region below the header). An
+    /// expanded snippet card grows to fill exactly this, so the panel frame
+    /// never has to change when a snippet is expanded.
+    static func itemsAreaHeight(rows: Int) -> CGFloat {
+        rows <= 0
             ? emptyHeight
             : CGFloat(rows) * rowHeight + CGFloat(rows - 1) * rowSpacing
-        return outerPadding * 2 + headerHeight + stackSpacing + content
+    }
+
+    static func panelHeight(rows: Int) -> CGFloat {
+        outerPadding * 2 + headerHeight + stackSpacing + itemsAreaHeight(rows: rows)
     }
 }
 
@@ -59,7 +65,7 @@ struct PopupView: View {
             if items.isEmpty {
                 emptyBlob
             } else {
-                itemsList
+                itemsArea
             }
         }
         .padding(PopupMetrics.outerPadding)
@@ -90,9 +96,10 @@ struct PopupView: View {
                 .font(.system(size: 12, weight: .semibold))
                 .foregroundStyle(.secondary)
             Spacer()
-            Text("↑↓  ↩  1–5  ⌫  esc")
+            Text(controller.isExpanded ? "←  back    ↩  paste    esc" : "↑↓  →  ↩  1–5  ⌫  esc")
                 .font(.system(size: 10))
                 .foregroundStyle(.tertiary)
+                .contentTransition(.opacity)
         }
         .padding(.horizontal, 14)
         .frame(height: PopupMetrics.headerHeight)
@@ -125,8 +132,54 @@ struct PopupView: View {
 
     // MARK: - Items
 
+    /// The region below the header. The stack of rows and the single expanded
+    /// card live in the same fixed-height slot; expanding cross-fades the list
+    /// out while the selected card grows up from its row to fill the slot, so
+    /// the panel frame never changes.
+    private var itemsArea: some View {
+        let areaHeight = PopupMetrics.itemsAreaHeight(rows: items.count)
+        let selected = min(max(0, controller.selection), items.count - 1)
+        let rowStride = PopupMetrics.rowHeight + PopupMetrics.rowSpacing
+        let collapsedOffset = CGFloat(selected) * rowStride
+
+        return ZStack(alignment: .top) {
+            itemsList
+                .allowsHitTesting(!controller.isExpanded)
+
+            // Always mounted so it can animate in *and* out. When collapsed it
+            // sits invisibly exactly over the selected row (same height, same
+            // offset), so expanding reads as that row growing into place.
+            ExpandedItemCard(
+                item: items[selected],
+                index: selected + 1,
+                onBack: { controller.collapse() },
+                onPaste: { controller.pasteSelected() }
+            )
+            .frame(height: controller.isExpanded ? areaHeight : PopupMetrics.rowHeight)
+            .offset(y: controller.isExpanded ? 0 : collapsedOffset)
+            .opacity(controller.isExpanded ? 1 : 0)
+            .allowsHitTesting(controller.isExpanded)
+        }
+        .frame(height: areaHeight)
+        // Clip to the items area (with breathing room for the blob shadows) so
+        // rows sliding out on expand disappear at the popup edge instead of
+        // spilling over the header or off the panel. The top inset only reaches
+        // the header gap; the others keep the full shadow spread.
+        .padding(EdgeInsets(top: PopupMetrics.stackSpacing,
+                            leading: PopupMetrics.outerPadding,
+                            bottom: PopupMetrics.outerPadding,
+                            trailing: PopupMetrics.outerPadding))
+        .clipped()
+        .padding(EdgeInsets(top: -PopupMetrics.stackSpacing,
+                            leading: -PopupMetrics.outerPadding,
+                            bottom: -PopupMetrics.outerPadding,
+                            trailing: -PopupMetrics.outerPadding))
+    }
+
     private var itemsList: some View {
-        VStack(spacing: PopupMetrics.rowSpacing) {
+        let areaHeight = PopupMetrics.itemsAreaHeight(rows: items.count)
+        let selected = min(max(0, controller.selection), items.count - 1)
+        return VStack(spacing: PopupMetrics.rowSpacing) {
             ForEach(Array(items.enumerated()), id: \.element.id) { idx, item in
                 ItemBlob(
                     item: item,
@@ -139,8 +192,21 @@ struct PopupView: View {
                     if hovering { controller.hover(idx) }
                 }
                 .modifier(BlobReveal(index: idx, reveal: reveal))
+                // On expand, rows above the selection slide up and out the top,
+                // rows below slide down and out the bottom; the selected row
+                // just fades as the card grows over it.
+                .offset(y: pushOffset(for: idx, selected: selected, area: areaHeight))
+                .opacity(controller.isExpanded && idx == selected ? 0 : 1)
             }
         }
+    }
+
+    /// How far a row is shoved off-screen when a *different* row is expanded.
+    /// One full items-area height guarantees it clears the clip boundary
+    /// regardless of where it sits in the list.
+    private func pushOffset(for index: Int, selected: Int, area: CGFloat) -> CGFloat {
+        guard controller.isExpanded, index != selected else { return 0 }
+        return index < selected ? -area : area
     }
 }
 
@@ -215,5 +281,137 @@ struct ItemBlob: View {
             RoundedRectangle(cornerRadius: PopupMetrics.cornerRadius, style: .continuous)
                 .strokeBorder(Color.accentColor.opacity(isSelected ? 0.7 : 0), lineWidth: 1.5)
         )
+    }
+}
+
+// MARK: - Expanded item card
+
+/// The full-height view of a single clip. Shown when the user hits the right
+/// arrow: a compact header (index, kind, back/paste actions) over a scrollable
+/// body that renders the clip's entire contents.
+struct ExpandedItemCard: View {
+    let item: ClipItem
+    let index: Int
+    var onBack: () -> Void
+    var onPaste: () -> Void
+
+    private static let timeFormatter: RelativeDateTimeFormatter = {
+        let f = RelativeDateTimeFormatter()
+        f.unitsStyle = .abbreviated
+        return f
+    }()
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            header
+            contents(for: item)
+                .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+        }
+        .padding(14)
+        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+        .shadow(color: .black.opacity(0.24), radius: 10, y: 4)
+        .glassEffect(in: RoundedRectangle(cornerRadius: PopupMetrics.cornerRadius, style: .continuous))
+        .overlay(
+            RoundedRectangle(cornerRadius: PopupMetrics.cornerRadius, style: .continuous)
+                .strokeBorder(Color.accentColor.opacity(0.7), lineWidth: 1.5)
+        )
+    }
+
+    private var header: some View {
+        HStack(spacing: 10) {
+            ZStack {
+                RoundedRectangle(cornerRadius: 6, style: .continuous)
+                    .fill(Color.accentColor.opacity(0.9))
+                    .frame(width: 18, height: 18)
+                Text("\(index)")
+                    .font(.system(size: 10, weight: .semibold, design: .rounded))
+                    .foregroundStyle(.white)
+            }
+            ClipLeadingVisual(item: item, side: 28)
+            VStack(alignment: .leading, spacing: 1) {
+                Text(item.summary)
+                    .font(.system(size: 12, weight: .semibold))
+                    .foregroundStyle(.primary)
+                    .lineLimit(1)
+                Text(Self.timeFormatter.localizedString(for: item.createdAt, relativeTo: Date()))
+                    .font(.system(size: 10))
+                    .foregroundStyle(.tertiary)
+                    .lineLimit(1)
+            }
+            Spacer(minLength: 6)
+            actionPill(symbol: "arrow.left", label: "Back", prominent: false, action: onBack)
+            actionPill(symbol: "return", label: "Paste", prominent: true, action: onPaste)
+        }
+    }
+
+    private func actionPill(symbol: String, label: String, prominent: Bool, action: @escaping () -> Void) -> some View {
+        Button(action: action) {
+            HStack(spacing: 4) {
+                Image(systemName: symbol)
+                    .font(.system(size: 9, weight: .semibold))
+                Text(label)
+                    .font(.system(size: 10, weight: .semibold))
+            }
+            .padding(.horizontal, 8)
+            .padding(.vertical, 5)
+            .background(
+                Capsule().fill(prominent ? Color.accentColor.opacity(0.9) : Color.secondary.opacity(0.18))
+            )
+            .foregroundStyle(prominent ? Color.white : Color.secondary)
+        }
+        .buttonStyle(.plain)
+    }
+
+    @ViewBuilder
+    private func contents(for item: ClipItem) -> some View {
+        switch item.kind {
+        case .text:
+            ScrollView {
+                Text(item.text ?? "")
+                    .font(.system(size: 12, design: item.textFlavor == .code ? .monospaced : .default))
+                    .foregroundStyle(.primary)
+                    .textSelection(.enabled)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .padding(.trailing, 4)
+            }
+        case .image:
+            if let thumb = ClipVisuals.thumbnail(for: item, side: 640) {
+                ScrollView {
+                    Image(nsImage: thumb)
+                        .resizable()
+                        .aspectRatio(contentMode: .fit)
+                        .frame(maxWidth: .infinity)
+                        .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
+                }
+            } else {
+                unavailable("Image unavailable")
+            }
+        case .file:
+            ScrollView {
+                VStack(alignment: .leading, spacing: 6) {
+                    ForEach(item.filePaths ?? [], id: \.self) { path in
+                        HStack(spacing: 8) {
+                            Image(nsImage: NSWorkspace.shared.icon(forFile: path))
+                                .resizable()
+                                .frame(width: 20, height: 20)
+                            Text((path as NSString).lastPathComponent)
+                                .font(.system(size: 12))
+                                .foregroundStyle(.primary)
+                                .lineLimit(1)
+                                .truncationMode(.middle)
+                            Spacer(minLength: 0)
+                        }
+                    }
+                }
+                .frame(maxWidth: .infinity, alignment: .leading)
+            }
+        }
+    }
+
+    private func unavailable(_ text: String) -> some View {
+        Text(text)
+            .font(.system(size: 12))
+            .foregroundStyle(.secondary)
+            .frame(maxWidth: .infinity, maxHeight: .infinity)
     }
 }

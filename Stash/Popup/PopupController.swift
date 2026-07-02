@@ -19,6 +19,11 @@ import SwiftUI
 final class PopupController: ObservableObject {
     @Published var selection: Int = 0
 
+    /// Whether the currently-selected clip is expanded to fill the popup
+    /// (driven by the right/left arrows). Mutations are wrapped in
+    /// `withAnimation` so the SwiftUI card grows/shrinks smoothly.
+    @Published private(set) var isExpanded = false
+
     /// Bumped on every `show()` so the popup can replay the blob entrance
     /// animation each time it appears. The hosting view is reused across
     /// show/hide, so `onAppear` alone only fires once.
@@ -67,6 +72,7 @@ final class PopupController: ObservableObject {
             previousApp = front
         }
         selection = 0
+        isExpanded = false
         revealToken &+= 1
 
         if panel == nil { panel = buildPanel() }
@@ -121,6 +127,22 @@ final class PopupController: ObservableObject {
         let count = visibleItems.count
         guard count > 0 else { return }
         selection = min(max(0, selection + delta), count - 1)
+    }
+
+    /// Blow the selected clip up to fill the whole popup so its full contents
+    /// are readable. No-op when there's nothing selected or it's already open.
+    func expandSelected() {
+        guard !isExpanded, selection >= 0, selection < visibleItems.count else { return }
+        withAnimation(.spring(response: 0.4, dampingFraction: 0.85)) {
+            isExpanded = true
+        }
+    }
+
+    func collapse() {
+        guard isExpanded else { return }
+        withAnimation(.spring(response: 0.4, dampingFraction: 0.85)) {
+            isExpanded = false
+        }
     }
 
     func hover(_ index: Int) {
@@ -231,7 +253,16 @@ final class PopupController: ObservableObject {
             .sink { [weak self] _ in
                 guard let self else { return }
 
-                self.selection = min(self.selection, max(0, self.visibleItems.count - 1))
+                if self.isExpanded {
+                    // The clip being read shifted out from under us (or the
+                    // list emptied) — drop back to the list rather than show a
+                    // different clip in the expanded card.
+                    if self.selection >= self.visibleItems.count {
+                        self.collapse()
+                    }
+                } else {
+                    self.selection = min(self.selection, max(0, self.visibleItems.count - 1))
+                }
                 self.resizePanel(animated: true)
             }
     }
@@ -281,16 +312,24 @@ final class PopupController: ObservableObject {
 
     private func handleKey(_ event: NSEvent) -> Bool {
         switch event.keyCode {
-        case 53:
-            hide(); return true
-        case 36, 76:
+        case 53: // esc — collapse first, then dismiss
+            if isExpanded { collapse() } else { hide() }
+            return true
+        case 36, 76: // return — paste works in either state
             pasteSelected(); return true
-        case 125:
-            moveSelection(by: 1); return true
-        case 126:
-            moveSelection(by: -1); return true
-        case 51:
-            deleteSelected(); return true
+        case 124: // right arrow — expand the selection
+            expandSelected(); return true
+        case 123: // left arrow — back to the list
+            collapse(); return true
+        case 125: // down
+            if !isExpanded { moveSelection(by: 1) }
+            return true
+        case 126: // up
+            if !isExpanded { moveSelection(by: -1) }
+            return true
+        case 51: // delete — only meaningful in the list
+            if !isExpanded { deleteSelected() }
+            return true
         default:
             // Bare digits only — ⌘1 etc. should keep their normal meaning.
             let mods = event.modifierFlags
