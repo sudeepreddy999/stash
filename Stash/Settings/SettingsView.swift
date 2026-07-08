@@ -13,19 +13,28 @@ struct SettingsView: View {
         ("⌘⇧B", Hotkey(keyCode: UInt32(kVK_ANSI_B), modifiers: UInt32(cmdKey | shiftKey))),
     ]
 
-    private let historySizes = [50, 100, 200, 500]
+    /// Retention windows in days; `0` keeps history forever.
+    private let retentionOptions: [(label: String, days: Int)] = [
+        ("Forever", 0),
+        ("1 day", 1),
+        ("1 week", 7),
+        ("1 month", 30),
+        ("3 months", 90),
+    ]
 
     var body: some View {
         Form {
             Section("General") {
                 Toggle("Launch Stash at login", isOn: $appState.launchAtLogin)
-                Picker("Keep up to", selection: maxItemsBinding) {
-                    ForEach(historySizes, id: \.self) { n in
-                        Text("\(n) clips").tag(n)
+            }
+            Section("Retention") {
+                Picker("Keep history for", selection: retentionBinding) {
+                    ForEach(retentionOptions, id: \.days) { option in
+                        Text(option.label).tag(option.days)
                     }
                 }
                 .pickerStyle(.menu)
-                Text("Pinned clips don't count against the limit and are never trimmed.")
+                Text("Clips older than this are removed automatically. Pinned clips are always kept.")
                     .font(.footnote)
                     .foregroundStyle(.secondary)
             }
@@ -80,10 +89,10 @@ struct SettingsView: View {
         )
     }
 
-    private var maxItemsBinding: Binding<Int> {
+    private var retentionBinding: Binding<Int> {
         Binding(
-            get: { store.maxItems },
-            set: { store.setMaxItems($0) }
+            get: { store.retentionDays },
+            set: { store.setRetentionDays($0) }
         )
     }
 }

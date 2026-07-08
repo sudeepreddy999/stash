@@ -21,12 +21,7 @@ enum ClipVisuals {
         let key = item.id as NSUUID
         if let cached = thumbnails.object(forKey: key) { return cached }
 
-        let src: CGImageSource?
-        if let legacy = item.legacyImageData {
-            src = CGImageSourceCreateWithData(legacy as CFData, nil)
-        } else {
-            src = CGImageSourceCreateWithURL(ClipStorage.imageURL(for: item.id) as CFURL, nil)
-        }
+        let src = CGImageSourceCreateWithURL(ClipStorage.imageURL(for: item.id) as CFURL, nil)
 
         let scale = NSScreen.main?.backingScaleFactor ?? 2
         let options: [CFString: Any] = [

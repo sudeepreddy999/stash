@@ -104,20 +104,26 @@ final class AppState: ObservableObject {
 
     /// Called from `AppDelegate.applicationDidFinishLaunching`.
     ///
-    /// If the user hasn't granted Accessibility we (a) show the system's
-    /// standard "add to Accessibility" dialog via `AXIsProcessTrustedWithOptions`,
-    /// and (b) also show our own `NSAlert` explaining *why* — with an
-    /// "Open System Settings" deep link. Our alert appears only once ever;
-    /// declining auto-paste is a valid choice and shouldn't be re-litigated
-    /// on every launch (Settings keeps a re-entry point).
+    /// No-op once Accessibility is granted (`AXIsProcessTrusted()` is a cheap
+    /// check with no UI). If it isn't granted, we ask exactly once ever:
+    /// (a) the system's standard "add to Accessibility" dialog via
+    /// `AXIsProcessTrustedWithOptions`, and (b) our own `NSAlert` explaining
+    /// *why*, with an "Open System Settings" deep link. Declining auto-paste is
+    /// a valid choice and shouldn't be re-litigated on every launch — a
+    /// once-only flag guards the whole ask (both prompts), and Settings keeps a
+    /// re-entry point.
     func requestAccessibilityIfNeeded() {
+        // Already granted — nothing to ask for.
         if AXIsProcessTrusted() { return }
+
+        // Ask at most once. The guard must sit *above* the system prompt too,
+        // or `AXIsProcessTrustedWithOptions(prompt:)` re-pops the system dialog
+        // on every launch while access stays ungranted.
+        guard !UserDefaults.standard.bool(forKey: Self.axAlertShownKey) else { return }
+        UserDefaults.standard.set(true, forKey: Self.axAlertShownKey)
 
         let promptKey = kAXTrustedCheckOptionPrompt.takeUnretainedValue() as String
         _ = AXIsProcessTrustedWithOptions([promptKey: true] as CFDictionary)
-
-        guard !UserDefaults.standard.bool(forKey: Self.axAlertShownKey) else { return }
-        UserDefaults.standard.set(true, forKey: Self.axAlertShownKey)
 
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.4) {
             self.showAccessibilityAlert()

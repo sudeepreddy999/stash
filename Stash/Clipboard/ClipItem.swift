@@ -2,7 +2,7 @@ import AppKit
 import CryptoKit
 import Foundation
 
-struct ClipItem: Identifiable, Codable, Equatable {
+struct ClipItem: Identifiable, Equatable {
     let id: UUID
     let createdAt: Date
     let kind: Kind
@@ -10,28 +10,17 @@ struct ClipItem: Identifiable, Codable, Equatable {
     let fileBookmarks: [Data]?
     let filePaths: [String]?
     /// Pixel dimensions for image clips. The bitmap itself lives on disk at
-    /// `ClipStorage.imageURL(for: id)`, not in the manifest.
+    /// `ClipStorage.imageURL(for: id)`, never in the database row.
     let imageSize: CGSize?
     /// SHA-256 of the PNG bytes — lets the store de-duplicate image clips
     /// without reading files back.
     let imageHash: String?
-    /// Populated only when decoding a legacy `history.json` that inlined
-    /// image bytes. `ClipboardStore.load()` migrates it to `ClipStorage` and
-    /// drops it; it survives re-encoding only if that file write failed, so
-    /// no clip is ever lost.
-    let legacyImageData: Data?
-    /// Optional so histories written before pinning existed still decode.
     let pinned: Bool?
 
     var isPinned: Bool { pinned ?? false }
 
-    enum Kind: String, Codable {
+    enum Kind: String {
         case text, file, image
-    }
-
-    enum CodingKeys: String, CodingKey {
-        case id, createdAt, kind, text, fileBookmarks, filePaths, imageSize, imageHash, pinned
-        case legacyImageData = "imageData"
     }
 
     init(
@@ -43,7 +32,6 @@ struct ClipItem: Identifiable, Codable, Equatable {
         filePaths: [String]? = nil,
         imageSize: CGSize? = nil,
         imageHash: String? = nil,
-        legacyImageData: Data? = nil,
         pinned: Bool? = nil
     ) {
         self.id = id
@@ -54,17 +42,24 @@ struct ClipItem: Identifiable, Codable, Equatable {
         self.filePaths = filePaths
         self.imageSize = imageSize
         self.imageHash = imageHash
-        self.legacyImageData = legacyImageData
         self.pinned = pinned
     }
 
-    func withPinned(_ flag: Bool) -> ClipItem {
-        ClipItem(
-            id: id, createdAt: createdAt, kind: kind, text: text,
-            fileBookmarks: fileBookmarks, filePaths: filePaths,
-            imageSize: imageSize, imageHash: imageHash,
-            legacyImageData: legacyImageData, pinned: flag
-        )
+    /// Build the value-type view model from its persisted SwiftData row.
+    init(record: ClipRecord) {
+        self.id = record.id
+        self.createdAt = record.createdAt
+        self.kind = Kind(rawValue: record.kindRaw) ?? .text
+        self.text = record.text
+        self.fileBookmarks = record.fileBookmarks
+        self.filePaths = record.filePaths
+        if let w = record.imageWidth, let h = record.imageHeight {
+            self.imageSize = CGSize(width: w, height: h)
+        } else {
+            self.imageSize = nil
+        }
+        self.imageHash = record.imageHash
+        self.pinned = record.pinned
     }
 
     // MARK: - Text flavor
@@ -256,7 +251,7 @@ struct ClipItem: Identifiable, Codable, Equatable {
             let urls = resolvedFileURLs()
             if !urls.isEmpty { pb.writeObjects(urls as [NSURL]) }
         case .image:
-            if let data = ClipStorage.imageData(for: id) ?? legacyImageData {
+            if let data = ClipStorage.imageData(for: id) {
                 // Offer both PNG (original bytes) and TIFF so apps that only
                 // read one of the two still get the paste.
                 pb.setData(data, forType: .png)
